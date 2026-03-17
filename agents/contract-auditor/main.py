@@ -1,21 +1,20 @@
 """
 CryptoGuard - Smart Contract Auditor Agent
 ============================================
-Gradient AI ADK agent that audits smart contract code for vulnerabilities.
-Checks for honeypot patterns, hidden mints, proxy upgradability, and ownership issues.
-
-Setup:
-  pip install -r requirements.txt
-  gradient agent deploy
+Gradient AI ADK agent using LangGraph ReAct pattern.
+Audits smart contract code for vulnerabilities: honeypot patterns,
+hidden mints, proxy upgradability, and ownership issues.
 """
 
 import json
 import logging
-import re
-from typing import Any
+import os
 
 import httpx
-from gradient_ai import entrypoint
+from gradient_adk import entrypoint
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("contract-auditor")
@@ -84,122 +83,7 @@ KNOWN VULNERABILITY PATTERNS:
 """
 
 # ---------------------------------------------------------------------------
-# Tool definitions
-# ---------------------------------------------------------------------------
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_contract_source",
-            "description": "Fetch verified contract source code from a block explorer (Etherscan, Solscan, BSCScan).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "contract_address": {
-                        "type": "string",
-                        "description": "The contract/program address.",
-                    },
-                    "chain": {
-                        "type": "string",
-                        "description": "Blockchain. Default: solana",
-                        "enum": ["solana", "ethereum", "bsc", "base", "arbitrum"],
-                    },
-                },
-                "required": ["contract_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_contract_abi",
-            "description": "Fetch the contract ABI to analyze function signatures and access modifiers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "contract_address": {
-                        "type": "string",
-                        "description": "The contract address (EVM chains only).",
-                    },
-                    "chain": {
-                        "type": "string",
-                        "description": "Blockchain. Default: ethereum",
-                        "enum": ["ethereum", "bsc", "base", "arbitrum"],
-                    },
-                },
-                "required": ["contract_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_honeypot",
-            "description": "Check if a token contract is a honeypot using the Honeypot.is API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token contract address.",
-                    },
-                    "chain": {
-                        "type": "string",
-                        "description": "Chain ID. Default: 1 (Ethereum)",
-                        "enum": ["1", "56", "8453", "42161"],
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_gopluslabs_security",
-            "description": "Fetch token security audit data from GoPlus Labs API including honeypot check, owner analysis, and trading restrictions.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token contract address.",
-                    },
-                    "chain_id": {
-                        "type": "string",
-                        "description": "Chain ID: 1=ETH, 56=BSC, 137=Polygon, 42161=Arbitrum. Default: 1",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "analyze_bytecode_patterns",
-            "description": "Analyze raw contract bytecode for known malicious patterns like selfdestruct, delegatecall to external addresses, or hidden proxy patterns.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "contract_address": {
-                        "type": "string",
-                        "description": "The contract address.",
-                    },
-                    "chain": {
-                        "type": "string",
-                        "description": "Blockchain. Default: ethereum",
-                        "enum": ["ethereum", "bsc", "base", "arbitrum"],
-                    },
-                },
-                "required": ["contract_address"],
-            },
-        },
-    },
-]
-
-# ---------------------------------------------------------------------------
-# Tool implementations
+# HTTP helper
 # ---------------------------------------------------------------------------
 ETHERSCAN_BASE = "https://api.etherscan.io/api"
 HONEYPOT_BASE = "https://api.honeypot.is/v2"
@@ -218,21 +102,24 @@ async def _http_get(url: str, headers: dict | None = None, timeout: float = 15.0
         return {"error": str(exc), "url": url}
 
 
-async def fetch_contract_source(contract_address: str, chain: str = "solana") -> dict:
-    """Fetch verified source code from block explorers."""
+# ---------------------------------------------------------------------------
+# LangChain tool definitions
+# ---------------------------------------------------------------------------
+@tool
+async def fetch_contract_source(contract_address: str, chain: str = "solana") -> str:
+    """Fetch verified contract source code from a block explorer (Etherscan, Solscan, BSCScan)."""
     if chain == "solana":
-        # Solana programs — check if verified on Solscan
         url = f"https://pro-api.solscan.io/v2.0/account/{contract_address}"
         data = await _http_get(url, headers={"token": ""})
         if "error" in data:
-            return {
+            return json.dumps({
                 "note": "Solscan API key not configured. For Solana programs, "
                         "provide the source code directly or check anchor-verified status.",
                 "contract_address": contract_address,
                 "suggestion": "Try searching for the program IDL on-chain or check "
                               "https://solscan.io/account/" + contract_address,
-            }
-        return data.get("data", data)
+            })
+        return json.dumps(data.get("data", data))
 
     # EVM chains
     explorer_urls = {
@@ -248,7 +135,7 @@ async def fetch_contract_source(contract_address: str, chain: str = "solana") ->
     if data.get("status") == "1" and data.get("result"):
         result = data["result"][0]
         source = result.get("SourceCode", "")
-        return {
+        return json.dumps({
             "contract_name": result.get("ContractName"),
             "compiler_version": result.get("CompilerVersion"),
             "optimization_used": result.get("OptimizationUsed"),
@@ -257,12 +144,13 @@ async def fetch_contract_source(contract_address: str, chain: str = "solana") ->
             "source_code_length": len(source),
             "source_code": source[:10000] if source else "Not verified",
             "license": result.get("LicenseType"),
-        }
-    return {"error": "Source code not verified or not found", "contract_address": contract_address}
+        })
+    return json.dumps({"error": "Source code not verified or not found", "contract_address": contract_address})
 
 
-async def fetch_contract_abi(contract_address: str, chain: str = "ethereum") -> dict:
-    """Fetch contract ABI from block explorer."""
+@tool
+async def fetch_contract_abi(contract_address: str, chain: str = "ethereum") -> str:
+    """Fetch the contract ABI to analyze function signatures and access modifiers."""
     explorer_urls = {
         "ethereum": ETHERSCAN_BASE,
         "bsc": "https://api.bscscan.com/api",
@@ -276,7 +164,6 @@ async def fetch_contract_abi(contract_address: str, chain: str = "ethereum") -> 
     if data.get("status") == "1":
         try:
             abi = json.loads(data["result"])
-            # Extract key function signatures for analysis
             functions = []
             for item in abi:
                 if item.get("type") == "function":
@@ -286,7 +173,7 @@ async def fetch_contract_abi(contract_address: str, chain: str = "ethereum") -> 
                         "outputs": [o.get("type") for o in item.get("outputs", [])],
                         "state_mutability": item.get("stateMutability"),
                     })
-            return {
+            return json.dumps({
                 "total_functions": len(functions),
                 "functions": functions,
                 "has_owner_functions": any("owner" in f["name"].lower() for f in functions),
@@ -297,22 +184,23 @@ async def fetch_contract_abi(contract_address: str, chain: str = "ethereum") -> 
                     for f in functions
                     for kw in ["blacklist", "blocklist", "ban", "restrict"]
                 ),
-            }
+            })
         except json.JSONDecodeError:
-            return {"error": "Invalid ABI format", "contract_address": contract_address}
-    return {"error": "ABI not available", "contract_address": contract_address}
+            return json.dumps({"error": "Invalid ABI format", "contract_address": contract_address})
+    return json.dumps({"error": "ABI not available", "contract_address": contract_address})
 
 
-async def check_honeypot(token_address: str, chain: str = "1") -> dict:
-    """Check honeypot status via Honeypot.is API."""
+@tool
+async def check_honeypot(token_address: str, chain: str = "1") -> str:
+    """Check if a token contract is a honeypot using the Honeypot.is API."""
     url = f"{HONEYPOT_BASE}/IsHoneypot?address={token_address}&chainID={chain}"
     data = await _http_get(url)
     if "error" in data:
-        return data
+        return json.dumps(data)
 
     honeypot_result = data.get("honeypotResult", {})
     simulation = data.get("simulationResult", {})
-    return {
+    result = {
         "is_honeypot": honeypot_result.get("isHoneypot", None),
         "honeypot_reason": honeypot_result.get("honeypotReason"),
         "buy_tax": simulation.get("buyTax"),
@@ -323,21 +211,23 @@ async def check_honeypot(token_address: str, chain: str = "1") -> dict:
         "max_buy": data.get("holderAnalysis", {}).get("maxBuy"),
         "max_sell": data.get("holderAnalysis", {}).get("maxSell"),
     }
+    return json.dumps(result)
 
 
-async def fetch_gopluslabs_security(token_address: str, chain_id: str = "1") -> dict:
-    """Fetch security data from GoPlus Labs (free, no API key)."""
+@tool
+async def fetch_gopluslabs_security(token_address: str, chain_id: str = "1") -> str:
+    """Fetch token security audit data from GoPlus Labs API including honeypot check, owner analysis, and trading restrictions."""
     url = f"{GOPLUS_BASE}/token_security/{chain_id}?contract_addresses={token_address}"
     data = await _http_get(url)
     if "error" in data:
-        return data
+        return json.dumps(data)
 
     result = data.get("result", {})
     token_data = result.get(token_address.lower(), {})
     if not token_data:
-        return {"error": "Token not found in GoPlus database", "token_address": token_address}
+        return json.dumps({"error": "Token not found in GoPlus database", "token_address": token_address})
 
-    return {
+    return json.dumps({
         "is_open_source": token_data.get("is_open_source"),
         "is_proxy": token_data.get("is_proxy"),
         "is_mintable": token_data.get("is_mintable"),
@@ -358,11 +248,12 @@ async def fetch_gopluslabs_security(token_address: str, chain_id: str = "1") -> 
         "total_supply": token_data.get("total_supply"),
         "owner_address": token_data.get("owner_address"),
         "creator_address": token_data.get("creator_address"),
-    }
+    })
 
 
-async def analyze_bytecode_patterns(contract_address: str, chain: str = "ethereum") -> dict:
-    """Analyze bytecode for known malicious opcodes."""
+@tool
+async def analyze_bytecode_patterns(contract_address: str, chain: str = "ethereum") -> str:
+    """Analyze raw contract bytecode for known malicious patterns like selfdestruct, delegatecall to external addresses, or hidden proxy patterns."""
     explorer_urls = {
         "ethereum": ETHERSCAN_BASE,
         "bsc": "https://api.bscscan.com/api",
@@ -375,9 +266,8 @@ async def analyze_bytecode_patterns(contract_address: str, chain: str = "ethereu
 
     bytecode = data.get("result", "")
     if not bytecode or bytecode == "0x":
-        return {"error": "No bytecode found (EOA or empty)", "contract_address": contract_address}
+        return json.dumps({"error": "No bytecode found (EOA or empty)", "contract_address": contract_address})
 
-    # Analyze opcodes
     findings = []
 
     # SELFDESTRUCT (0xff)
@@ -404,46 +294,45 @@ async def analyze_bytecode_patterns(contract_address: str, chain: str = "ethereu
             "description": "Contract uses CREATE2 — could be a metamorphic contract that replaces itself.",
         })
 
-    return {
+    result = {
         "bytecode_length": len(bytecode),
         "is_contract": len(bytecode) > 2,
         "findings": findings,
         "finding_count": len(findings),
     }
+    return json.dumps(result)
 
 
-TOOL_HANDLERS: dict[str, Any] = {
-    "fetch_contract_source": fetch_contract_source,
-    "fetch_contract_abi": fetch_contract_abi,
-    "check_honeypot": check_honeypot,
-    "fetch_gopluslabs_security": fetch_gopluslabs_security,
-    "analyze_bytecode_patterns": analyze_bytecode_patterns,
-}
+# ---------------------------------------------------------------------------
+# LangGraph ReAct agent
+# ---------------------------------------------------------------------------
+llm = ChatOpenAI(
+    model=os.getenv("GRADIENT_MODEL", "llama3.3-70b-instruct"),
+    base_url="https://inference.do-ai.run/v1",
+    api_key=os.getenv("GRADIENT_MODEL_ACCESS_KEY", ""),
+    temperature=0,
+    max_retries=5,
+)
+
+tools = [
+    fetch_contract_source,
+    fetch_contract_abi,
+    check_honeypot,
+    fetch_gopluslabs_security,
+    analyze_bytecode_patterns,
+]
+
+agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 
 # ---------------------------------------------------------------------------
 # ADK entrypoint
 # ---------------------------------------------------------------------------
 @entrypoint
-async def main(request):
+async def run(payload):
     """Smart Contract Auditor agent entrypoint."""
-    messages = request.get("messages", [])
-    last_message = messages[-1] if messages else {}
-
-    if last_message.get("role") == "tool":
-        tool_name = last_message.get("name", "")
-        handler = TOOL_HANDLERS.get(tool_name)
-        if handler:
-            try:
-                args = json.loads(last_message.get("content", "{}"))
-                result = await handler(**args)
-                return {"content": json.dumps(result, indent=2)}
-            except Exception as exc:
-                logger.error("Tool %s failed: %s", tool_name, exc)
-                return {"content": json.dumps({"error": str(exc)})}
-
-    return {
-        "system": SYSTEM_PROMPT,
-        "tools": TOOLS,
-        "messages": messages,
-    }
+    query = payload.get("input", "") or payload.get("query", "") or str(payload)
+    result = await agent.ainvoke({"messages": [("user", query)]})
+    messages = result.get("messages", [])
+    final = messages[-1].content if messages else "No audit generated."
+    return {"output": final}

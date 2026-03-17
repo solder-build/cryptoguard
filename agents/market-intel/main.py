@@ -1,21 +1,20 @@
 """
 CryptoGuard - Market Intelligence Agent
 =========================================
-Gradient AI ADK agent that analyzes market context and social signals.
-Checks trading volume patterns, whale movements, sentiment, and team verification.
-
-Setup:
-  pip install -r requirements.txt
-  gradient agent deploy
+Gradient AI ADK agent using LangGraph ReAct pattern.
+Analyzes market context and social signals: trading volume patterns,
+whale movements, sentiment, and team verification.
 """
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any
+import os
 
 import httpx
-from gradient_ai import entrypoint
+from gradient_adk import entrypoint
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("market-intel")
@@ -81,111 +80,7 @@ MARKET MANIPULATION PATTERNS:
 """
 
 # ---------------------------------------------------------------------------
-# Tool definitions
-# ---------------------------------------------------------------------------
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_dexscreener_profile",
-            "description": "Fetch token profile and trading data from DexScreener including social links and community info.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token contract/mint address.",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_trading_history",
-            "description": "Fetch recent trading history for a token to analyze volume patterns and whale transactions.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token contract/mint address.",
-                    },
-                    "chain": {
-                        "type": "string",
-                        "description": "Blockchain. Default: solana",
-                        "enum": ["solana", "ethereum", "bsc", "base", "arbitrum"],
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_coingecko_data",
-            "description": "Fetch token data from CoinGecko including market data, community stats, and developer activity.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_id": {
-                        "type": "string",
-                        "description": "CoinGecko token ID or contract address.",
-                    },
-                },
-                "required": ["token_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_whale_transactions",
-            "description": "Fetch large transactions (whale movements) for a token from on-chain data.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token contract/mint address.",
-                    },
-                    "min_value_usd": {
-                        "type": "number",
-                        "description": "Minimum transaction value in USD to qualify as whale. Default: 10000",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_token_sentiment",
-            "description": "Search for token mentions and sentiment across crypto communities and social platforms.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Token name or symbol to search for.",
-                    },
-                    "token_address": {
-                        "type": "string",
-                        "description": "Token address for verification.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-]
-
-# ---------------------------------------------------------------------------
-# Tool implementations
+# HTTP helper
 # ---------------------------------------------------------------------------
 DEXSCREENER_BASE = "https://api.dexscreener.com/latest/dex"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
@@ -203,16 +98,20 @@ async def _http_get(url: str, headers: dict | None = None, timeout: float = 15.0
         return {"error": str(exc), "url": url}
 
 
-async def fetch_dexscreener_profile(token_address: str) -> dict:
-    """Fetch comprehensive token profile from DexScreener."""
+# ---------------------------------------------------------------------------
+# LangChain tool definitions
+# ---------------------------------------------------------------------------
+@tool
+async def fetch_dexscreener_profile(token_address: str) -> str:
+    """Fetch token profile and trading data from DexScreener including social links and community info."""
     url = f"{DEXSCREENER_BASE}/tokens/{token_address}"
     data = await _http_get(url)
     if "error" in data:
-        return data
+        return json.dumps(data)
 
     pairs = data.get("pairs") or []
     if not pairs:
-        return {"error": "No trading pairs found", "token_address": token_address}
+        return json.dumps({"error": "No trading pairs found", "token_address": token_address})
 
     primary = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
@@ -228,17 +127,12 @@ async def fetch_dexscreener_profile(token_address: str) -> dict:
     sells = int(txns_24h.get("sells", 0) or 0)
     total_txns = buys + sells
 
-    # Volume/MC ratio — healthy is 0.05-0.3, suspicious if >1.0
     vol_mc_ratio = vol_24h / mcap if mcap > 0 else 0
-    # Volume/liquidity ratio — healthy is <5, suspicious if >20
     vol_liq_ratio = vol_24h / liq if liq > 0 else 0
-    # Buy/sell ratio — healthy is 0.8-1.2
     buy_sell_ratio = buys / sells if sells > 0 else float("inf")
-
-    # Volume distribution — is it front-loaded?
     vol_1h_pct = (vol_1h / vol_24h * 100) if vol_24h > 0 else 0
 
-    return {
+    result = {
         "token_name": primary.get("baseToken", {}).get("name"),
         "token_symbol": primary.get("baseToken", {}).get("symbol"),
         "price_usd": primary.get("priceUsd"),
@@ -263,40 +157,38 @@ async def fetch_dexscreener_profile(token_address: str) -> dict:
         "socials": primary.get("info", {}).get("socials", []),
         "total_pairs": len(pairs),
     }
+    return json.dumps(result)
 
 
-async def fetch_trading_history(token_address: str, chain: str = "solana") -> dict:
-    """Fetch recent trades to detect patterns."""
-    # Use DexScreener pairs endpoint for trade data
+@tool
+async def fetch_trading_history(token_address: str, chain: str = "solana") -> str:
+    """Fetch recent trading history for a token to analyze volume patterns and whale transactions."""
     url = f"{DEXSCREENER_BASE}/tokens/{token_address}"
     data = await _http_get(url)
     if "error" in data:
-        return data
+        return json.dumps(data)
 
     pairs = data.get("pairs") or []
     if not pairs:
-        return {"error": "No pairs found", "token_address": token_address}
+        return json.dumps({"error": "No pairs found", "token_address": token_address})
 
     chain_pairs = [p for p in pairs if p.get("chainId") == chain]
     if not chain_pairs:
         chain_pairs = pairs
 
-    # Aggregate across all pairs on the requested chain
     total_vol_24h = sum(float(p.get("volume", {}).get("h24", 0) or 0) for p in chain_pairs)
     total_buys = sum(int(p.get("txns", {}).get("h24", {}).get("buys", 0) or 0) for p in chain_pairs)
     total_sells = sum(int(p.get("txns", {}).get("h24", {}).get("sells", 0) or 0) for p in chain_pairs)
 
-    # Check for volume anomalies across time windows
     primary = max(chain_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
     vol_5m = float(primary.get("volume", {}).get("m5", 0) or 0)
     vol_1h = float(primary.get("volume", {}).get("h1", 0) or 0)
     vol_6h = float(primary.get("volume", {}).get("h6", 0) or 0)
     vol_24h = float(primary.get("volume", {}).get("h24", 0) or 0)
 
-    # Volume acceleration — rapid increase is suspicious
     vol_acceleration = (vol_1h * 24) / vol_24h if vol_24h > 0 else 0
 
-    return {
+    result = {
         "chain": chain,
         "total_pairs": len(chain_pairs),
         "aggregate_volume_24h": total_vol_24h,
@@ -313,30 +205,30 @@ async def fetch_trading_history(token_address: str, chain: str = "solana") -> di
             else "LOW — declining interest"
         ),
     }
+    return json.dumps(result)
 
 
-async def fetch_coingecko_data(token_id: str) -> dict:
-    """Fetch data from CoinGecko free API."""
-    # Try as an ID first, then as contract address
+@tool
+async def fetch_coingecko_data(token_id: str) -> str:
+    """Fetch token data from CoinGecko including market data, community stats, and developer activity."""
     url = f"{COINGECKO_BASE}/coins/{token_id}"
     data = await _http_get(url)
     if "error" in data:
-        # Try searching by contract address on Solana
         url = f"{COINGECKO_BASE}/coins/solana/contract/{token_id}"
         data = await _http_get(url)
 
     if "error" in data:
-        return {
+        return json.dumps({
             "note": "Token not found on CoinGecko. This could mean it's too new or too small "
                     "to be listed, which itself is a risk signal for newer tokens.",
             "token_id": token_id,
-        }
+        })
 
     market_data = data.get("market_data", {})
     community = data.get("community_data", {})
     developer = data.get("developer_data", {})
 
-    return {
+    result = {
         "name": data.get("name"),
         "symbol": data.get("symbol"),
         "market_cap_rank": data.get("market_cap_rank"),
@@ -361,20 +253,20 @@ async def fetch_coingecko_data(token_id: str) -> dict:
         "categories": data.get("categories", []),
         "platforms": data.get("platforms", {}),
     }
+    return json.dumps(result)
 
 
-async def fetch_whale_transactions(token_address: str, min_value_usd: float = 10000) -> dict:
-    """Fetch large transactions. Uses DexScreener data as a proxy."""
-    # DexScreener doesn't provide individual tx data, so we analyze
-    # volume concentration as a whale indicator
+@tool
+async def fetch_whale_transactions(token_address: str, min_value_usd: float = 10000) -> str:
+    """Fetch large transactions (whale movements) for a token from on-chain data."""
     url = f"{DEXSCREENER_BASE}/tokens/{token_address}"
     data = await _http_get(url)
     if "error" in data:
-        return data
+        return json.dumps(data)
 
     pairs = data.get("pairs") or []
     if not pairs:
-        return {"error": "No pairs found", "token_address": token_address}
+        return json.dumps({"error": "No pairs found", "token_address": token_address})
 
     primary = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
@@ -384,10 +276,9 @@ async def fetch_whale_transactions(token_address: str, min_value_usd: float = 10
     avg_tx_size = vol_24h / total_txns if total_txns > 0 else 0
     liq = float(primary.get("liquidity", {}).get("usd", 0) or 0)
 
-    # High avg tx size relative to liquidity = whale dominated
     whale_dominance = avg_tx_size / liq if liq > 0 else 0
 
-    return {
+    result = {
         "volume_24h": vol_24h,
         "total_transactions_24h": total_txns,
         "avg_transaction_size_usd": round(avg_tx_size, 2),
@@ -405,23 +296,23 @@ async def fetch_whale_transactions(token_address: str, min_value_usd: float = 10
         "note": "Individual transaction data requires dedicated on-chain indexer. "
                 "This analysis is based on aggregate volume patterns.",
     }
+    return json.dumps(result)
 
 
-async def search_token_sentiment(query: str, token_address: str = "") -> dict:
-    """Search for token sentiment using CoinGecko trending and search."""
-    # Check if token is trending on CoinGecko
+@tool
+async def search_token_sentiment(query: str, token_address: str = "") -> str:
+    """Search for token mentions and sentiment across crypto communities and social platforms."""
     trending = await _http_get(f"{COINGECKO_BASE}/search/trending")
     trending_coins = []
     if "coins" in trending:
         trending_coins = [c.get("item", {}).get("symbol", "").upper() for c in trending["coins"]]
 
-    # Search CoinGecko
     search_data = await _http_get(f"{COINGECKO_BASE}/search?query={query}")
     found_coins = search_data.get("coins", []) if "error" not in search_data else []
 
     is_trending = query.upper() in trending_coins
 
-    return {
+    result = {
         "query": query,
         "is_trending_on_coingecko": is_trending,
         "coingecko_search_results": len(found_coins),
@@ -444,40 +335,39 @@ async def search_token_sentiment(query: str, token_address: str = "") -> dict:
             "This provides CoinGecko aggregated data only."
         ),
     }
+    return json.dumps(result)
 
 
-TOOL_HANDLERS: dict[str, Any] = {
-    "fetch_dexscreener_profile": fetch_dexscreener_profile,
-    "fetch_trading_history": fetch_trading_history,
-    "fetch_coingecko_data": fetch_coingecko_data,
-    "fetch_whale_transactions": fetch_whale_transactions,
-    "search_token_sentiment": search_token_sentiment,
-}
+# ---------------------------------------------------------------------------
+# LangGraph ReAct agent
+# ---------------------------------------------------------------------------
+llm = ChatOpenAI(
+    model=os.getenv("GRADIENT_MODEL", "llama3.3-70b-instruct"),
+    base_url="https://inference.do-ai.run/v1",
+    api_key=os.getenv("GRADIENT_MODEL_ACCESS_KEY", ""),
+    temperature=0,
+    max_retries=5,
+)
+
+tools = [
+    fetch_dexscreener_profile,
+    fetch_trading_history,
+    fetch_coingecko_data,
+    fetch_whale_transactions,
+    search_token_sentiment,
+]
+
+agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 
 # ---------------------------------------------------------------------------
 # ADK entrypoint
 # ---------------------------------------------------------------------------
 @entrypoint
-async def main(request):
+async def run(payload):
     """Market Intelligence agent entrypoint."""
-    messages = request.get("messages", [])
-    last_message = messages[-1] if messages else {}
-
-    if last_message.get("role") == "tool":
-        tool_name = last_message.get("name", "")
-        handler = TOOL_HANDLERS.get(tool_name)
-        if handler:
-            try:
-                args = json.loads(last_message.get("content", "{}"))
-                result = await handler(**args)
-                return {"content": json.dumps(result, indent=2)}
-            except Exception as exc:
-                logger.error("Tool %s failed: %s", tool_name, exc)
-                return {"content": json.dumps({"error": str(exc)})}
-
-    return {
-        "system": SYSTEM_PROMPT,
-        "tools": TOOLS,
-        "messages": messages,
-    }
+    query = payload.get("input", "") or payload.get("query", "") or str(payload)
+    result = await agent.ainvoke({"messages": [("user", query)]})
+    messages = result.get("messages", [])
+    final = messages[-1].content if messages else "No analysis generated."
+    return {"output": final}

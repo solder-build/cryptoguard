@@ -1,22 +1,20 @@
 """
 CryptoGuard - Token Risk Analyzer Agent
 ========================================
-Gradient AI ADK agent that performs forensic analysis of crypto tokens.
-Checks liquidity, holder concentration, contract permissions, and mint/freeze authority.
-
-Setup:
-  pip install -r requirements.txt
-  gradient agent deploy
-
-Endpoint is OpenAI-compatible: POST /api/v1/chat/completions
+Gradient AI ADK agent using LangGraph ReAct pattern.
+Performs forensic analysis of crypto tokens: liquidity, holder concentration,
+contract permissions, and mint/freeze authority.
 """
 
 import json
 import logging
-from typing import Any
+import os
 
 import httpx
-from gradient_ai import entrypoint
+from gradient_adk import entrypoint
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("token-analyzer")
@@ -78,107 +76,7 @@ KNOWN SCAM PATTERNS:
 """
 
 # ---------------------------------------------------------------------------
-# Tool definitions (OpenAI function-calling format)
-# ---------------------------------------------------------------------------
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_dexscreener_token",
-            "description": "Fetch token pair data from DexScreener including price, liquidity, volume, and transaction counts.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token contract/mint address to look up.",
-                    },
-                    "chain": {
-                        "type": "string",
-                        "description": "Blockchain to search on. Default: solana",
-                        "enum": ["solana", "ethereum", "bsc", "base", "arbitrum"],
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_birdeye_token_security",
-            "description": "Fetch token security data from Birdeye including holder distribution, top holders, and mint/freeze authority status.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token mint address.",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_birdeye_token_overview",
-            "description": "Fetch token overview from Birdeye including market cap, supply info, and basic metadata.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token mint address.",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_solscan_token_holders",
-            "description": "Fetch top token holders from Solscan to analyze holder concentration.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token mint address on Solana.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Number of top holders to return. Default 20.",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_solscan_token_meta",
-            "description": "Fetch token metadata and authority info from Solscan including mint authority, freeze authority, and supply.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "token_address": {
-                        "type": "string",
-                        "description": "The token mint address on Solana.",
-                    },
-                },
-                "required": ["token_address"],
-            },
-        },
-    },
-]
-
-# ---------------------------------------------------------------------------
-# Tool implementations
+# HTTP helper
 # ---------------------------------------------------------------------------
 DEXSCREENER_BASE = "https://api.dexscreener.com/latest/dex"
 BIRDEYE_BASE = "https://public-api.birdeye.so"
@@ -200,16 +98,20 @@ async def _http_get(url: str, headers: dict | None = None, timeout: float = 15.0
         return {"error": str(exc), "url": url}
 
 
-async def fetch_dexscreener_token(token_address: str, chain: str = "solana") -> dict:
-    """Fetch pair data from DexScreener public API (no key needed)."""
+# ---------------------------------------------------------------------------
+# LangChain tool definitions
+# ---------------------------------------------------------------------------
+@tool
+async def fetch_dexscreener_token(token_address: str, chain: str = "solana") -> str:
+    """Fetch token pair data from DexScreener including price, liquidity, volume, and transaction counts."""
     url = f"{DEXSCREENER_BASE}/tokens/{token_address}"
     data = await _http_get(url)
     if "error" in data:
-        return data
+        return json.dumps(data)
 
     pairs = data.get("pairs") or []
     if not pairs:
-        return {"error": "No pairs found for this token", "token_address": token_address}
+        return json.dumps({"error": "No pairs found for this token", "token_address": token_address})
 
     # Filter to requested chain if present
     chain_pairs = [p for p in pairs if p.get("chainId") == chain]
@@ -219,7 +121,7 @@ async def fetch_dexscreener_token(token_address: str, chain: str = "solana") -> 
     # Take the highest-liquidity pair
     primary = max(chain_pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
-    return {
+    result = {
         "pair_address": primary.get("pairAddress"),
         "dex": primary.get("dexId"),
         "chain": primary.get("chainId"),
@@ -237,102 +139,96 @@ async def fetch_dexscreener_token(token_address: str, chain: str = "solana") -> 
         "pair_created_at": primary.get("pairCreatedAt"),
         "total_pairs_found": len(pairs),
     }
+    return json.dumps(result)
 
 
-async def fetch_birdeye_token_security(token_address: str) -> dict:
-    """Fetch token security info from Birdeye public API."""
+@tool
+async def fetch_birdeye_token_security(token_address: str) -> str:
+    """Fetch token security data from Birdeye including holder distribution, top holders, and mint/freeze authority status."""
     url = f"{BIRDEYE_BASE}/defi/token_security?address={token_address}"
     headers = {"X-API-KEY": "", "x-chain": "solana"}
     data = await _http_get(url, headers=headers)
     if "error" in data:
-        # Birdeye may require API key; return partial info
-        return {
+        return json.dumps({
             "note": "Birdeye API key not configured — security data unavailable. "
                     "Configure BIRDEYE_API_KEY in environment for full analysis.",
             "token_address": token_address,
-        }
-    return data.get("data", data)
+        })
+    return json.dumps(data.get("data", data))
 
 
-async def fetch_birdeye_token_overview(token_address: str) -> dict:
-    """Fetch token overview from Birdeye."""
+@tool
+async def fetch_birdeye_token_overview(token_address: str) -> str:
+    """Fetch token overview from Birdeye including market cap, supply info, and basic metadata."""
     url = f"{BIRDEYE_BASE}/defi/token_overview?address={token_address}"
     headers = {"X-API-KEY": "", "x-chain": "solana"}
     data = await _http_get(url, headers=headers)
     if "error" in data:
-        return {
+        return json.dumps({
             "note": "Birdeye API key not configured — overview data unavailable.",
             "token_address": token_address,
-        }
-    return data.get("data", data)
+        })
+    return json.dumps(data.get("data", data))
 
 
-async def fetch_solscan_token_holders(token_address: str, limit: int = 20) -> dict:
-    """Fetch top holders from Solscan."""
+@tool
+async def fetch_solscan_token_holders(token_address: str, limit: int = 20) -> str:
+    """Fetch top token holders from Solscan to analyze holder concentration."""
     url = f"{SOLSCAN_BASE}/token/holders?address={token_address}&page=1&page_size={limit}"
     headers = {"token": ""}  # Solscan pro API key
     data = await _http_get(url, headers=headers)
     if "error" in data:
-        return {
+        return json.dumps({
             "note": "Solscan API key not configured — holder data unavailable.",
             "token_address": token_address,
-        }
-    return data.get("data", data)
+        })
+    return json.dumps(data.get("data", data))
 
 
-async def fetch_solscan_token_meta(token_address: str) -> dict:
-    """Fetch token metadata from Solscan including authorities."""
+@tool
+async def fetch_solscan_token_meta(token_address: str) -> str:
+    """Fetch token metadata and authority info from Solscan including mint authority, freeze authority, and supply."""
     url = f"{SOLSCAN_BASE}/token/meta?address={token_address}"
     headers = {"token": ""}
     data = await _http_get(url, headers=headers)
     if "error" in data:
-        return {
+        return json.dumps({
             "note": "Solscan API key not configured — metadata unavailable.",
             "token_address": token_address,
-        }
-    return data.get("data", data)
+        })
+    return json.dumps(data.get("data", data))
 
 
-# Map tool names to implementations
-TOOL_HANDLERS: dict[str, Any] = {
-    "fetch_dexscreener_token": fetch_dexscreener_token,
-    "fetch_birdeye_token_security": fetch_birdeye_token_security,
-    "fetch_birdeye_token_overview": fetch_birdeye_token_overview,
-    "fetch_solscan_token_holders": fetch_solscan_token_holders,
-    "fetch_solscan_token_meta": fetch_solscan_token_meta,
-}
+# ---------------------------------------------------------------------------
+# LangGraph ReAct agent
+# ---------------------------------------------------------------------------
+llm = ChatOpenAI(
+    model=os.getenv("GRADIENT_MODEL", "llama3.3-70b-instruct"),
+    base_url="https://inference.do-ai.run/v1",
+    api_key=os.getenv("GRADIENT_MODEL_ACCESS_KEY", ""),
+    temperature=0,
+    max_retries=5,
+)
+
+tools = [
+    fetch_dexscreener_token,
+    fetch_birdeye_token_security,
+    fetch_birdeye_token_overview,
+    fetch_solscan_token_holders,
+    fetch_solscan_token_meta,
+]
+
+agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 
 # ---------------------------------------------------------------------------
 # ADK entrypoint
 # ---------------------------------------------------------------------------
 @entrypoint
-async def main(request):
-    """
-    Token Risk Analyzer agent entrypoint.
-
-    The Gradient AI runtime calls this function with the incoming request.
-    We return the system prompt, tools, and handle tool call results.
-    """
-    messages = request.get("messages", [])
-    last_message = messages[-1] if messages else {}
-
-    # If the last message contains tool call results, execute the tool
-    if last_message.get("role") == "tool":
-        tool_name = last_message.get("name", "")
-        handler = TOOL_HANDLERS.get(tool_name)
-        if handler:
-            try:
-                args = json.loads(last_message.get("content", "{}"))
-                result = await handler(**args)
-                return {"content": json.dumps(result, indent=2)}
-            except Exception as exc:
-                logger.error("Tool %s failed: %s", tool_name, exc)
-                return {"content": json.dumps({"error": str(exc)})}
-
-    # Standard request — return agent configuration
-    return {
-        "system": SYSTEM_PROMPT,
-        "tools": TOOLS,
-        "messages": messages,
-    }
+async def run(payload):
+    """Token Risk Analyzer agent entrypoint."""
+    query = payload.get("input", "") or payload.get("query", "") or str(payload)
+    result = await agent.ainvoke({"messages": [("user", query)]})
+    messages = result.get("messages", [])
+    final = messages[-1].content if messages else "No analysis generated."
+    return {"output": final}

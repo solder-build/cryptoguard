@@ -1,6 +1,6 @@
-name: cryptoguard-market-intel
+agent_name: cryptoguard-market-intel
+agent_environment: main
+entrypoint_file: main.py
 description: >
   Market intelligence analyst that monitors trading volume patterns, whale movements,
   social sentiment, and team verification to detect market manipulation and fraud.
-entrypoint: main.py
-python_version: "3.11"
