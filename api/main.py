@@ -141,10 +141,10 @@ class AnalyzeResponse(BaseModel):
 async def call_agent(
     agent_id: str,
     messages: list[dict],
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ) -> dict:
     """
-    Call a Gradient AI agent endpoint (OpenAI-compatible chat completions).
+    Call a Gradient AI ADK agent endpoint (POST /run with {"input": "..."}).
     Returns the full response dict or an error dict.
     """
     config = AGENT_CONFIG.get(agent_id)
@@ -160,27 +160,28 @@ async def call_agent(
                      f"Set {agent_id.upper().replace('-', '_')}_ENDPOINT in .env",
         }
 
-    url = f"{endpoint.rstrip('/')}/api/v1/chat/completions"
+    # ADK agents use /run endpoint with {"input": "..."} format
+    url = endpoint.rstrip("/")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "messages": messages,
-        "stream": False,
-    }
+    # Extract the last user message as the input
+    user_msg = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            user_msg = msg.get("content", "")
+            break
+    payload = {"input": user_msg}
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            # Extract the assistant message content
-            choices = data.get("choices", [])
-            if choices:
-                content = choices[0].get("message", {}).get("content", "")
-                return {"content": content, "raw": data}
-            return {"error": "No choices in response", "raw": data}
+            # ADK returns {"output": "..."} format
+            content = data.get("output", "") or data.get("content", "") or json.dumps(data)
+            return {"content": content, "raw": data}
     except httpx.HTTPStatusError as exc:
         logger.error("Agent %s returned HTTP %s", agent_id, exc.response.status_code)
         return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:500]}"}
@@ -192,40 +193,16 @@ async def call_agent(
 async def call_agent_streaming(
     agent_id: str,
     messages: list[dict],
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ):
     """
-    Call a Gradient AI agent with streaming enabled.
-    Yields SSE-formatted chunks.
+    Call a Gradient AI ADK agent. ADK agents don't natively stream via /run,
+    so we call synchronously and yield the result as a single SSE event.
     """
-    config = AGENT_CONFIG.get(agent_id)
-    if not config or not config["endpoint"]:
-        yield f"data: {json.dumps({'error': f'Agent {agent_id} not configured'})}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-
-    url = f"{config['endpoint'].rstrip('/')}/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {config['key']}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messages": messages,
-        "stream": True,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        yield f"{line}\n\n"
-                    elif line.strip():
-                        yield f"data: {line}\n\n"
-    except Exception as exc:
-        yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-        yield "data: [DONE]\n\n"
+    result = await call_agent(agent_id, messages, timeout)
+    content = result.get("content", result.get("error", "No response"))
+    yield f"data: {json.dumps({'content': content})}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -395,21 +372,14 @@ async def analyze(req: AnalyzeRequest):
 
     messages = [{"role": "user", "content": user_message}]
 
-    # Call all agents in parallel
-    tasks = {
-        agent_id: call_agent(agent_id, messages) for agent_id in agent_ids
-    }
-
+    # Call agents sequentially to avoid rate limits on free tier
+    # Switch to asyncio.gather for parallel calls if on a paid tier
     results = {}
-    agent_tasks = list(tasks.items())
-    coros = [t for _, t in agent_tasks]
-    completed = await asyncio.gather(*coros, return_exceptions=True)
-
-    for (agent_id, _), result in zip(agent_tasks, completed):
-        if isinstance(result, Exception):
-            results[agent_id] = {"error": str(result)}
-        else:
-            results[agent_id] = result
+    for agent_id in agent_ids:
+        try:
+            results[agent_id] = await call_agent(agent_id, messages)
+        except Exception as exc:
+            results[agent_id] = {"error": str(exc)}
 
     # Build agent responses and extract scores
     agent_responses = []
