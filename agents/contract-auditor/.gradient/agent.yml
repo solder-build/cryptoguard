@@ -1,0 +1,6 @@
+name: cryptoguard-contract-auditor
+description: >
+  Smart contract security auditor that analyzes contract code for honeypot patterns,
+  hidden mint functions, proxy upgradability risks, and ownership concentration issues.
+entrypoint: main.py
+python_version: "3.11"

@@ -1,0 +1,7 @@
+name: cryptoguard-token-analyzer
+description: >
+  Forensic token risk analyzer that checks liquidity depth, holder concentration,
+  contract permissions, mint/freeze authority, and market patterns to produce
+  a deterministic risk score (0-100).
+entrypoint: main.py
+python_version: "3.11"
