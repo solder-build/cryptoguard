@@ -339,6 +339,41 @@ async def search_token_sentiment(query: str, token_address: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Base retrieval tool
+# ---------------------------------------------------------------------------
+KB_MANIPULATION = "97956f4e-2271-11f1-b074-4e013e2ddde4"
+KB_SAFETY = "a7a06322-2271-11f1-b074-4e013e2ddde4"
+KBAAS_URL = "https://kbaas.do-ai.run/v1"
+
+
+async def _kb_post(url: str, headers: dict, json_body: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(url, headers=headers, json=json_body)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.warning("KB request error: %s", exc)
+        return {"error": str(exc)}
+
+
+@tool
+async def search_manipulation_patterns(query: str) -> str:
+    """Search CryptoGuard's knowledge base of market manipulation patterns, wash trading indicators, pump-and-dump schemes, and real manipulation case studies."""
+    do_token = os.getenv("DIGITALOCEAN_API_TOKEN", "") or os.getenv("DIGITALOCEAN_ACCESS_TOKEN", "")
+    if not do_token:
+        return json.dumps({"note": "Knowledge base unavailable — DIGITALOCEAN_API_TOKEN not set. Proceeding with live API data only."})
+    results = []
+    for kb_uuid in [KB_MANIPULATION, KB_SAFETY]:
+        url = f"{KBAAS_URL}/{kb_uuid}/retrieve"
+        headers = {"Authorization": f"Bearer {do_token}"}
+        data = await _kb_post(url, headers=headers, json_body={"query": query, "num_results": 3})
+        for r in data.get("results", []):
+            results.append(r.get("text_content", ""))
+    return json.dumps({"knowledge_base_results": results[:5]}) if results else json.dumps({"note": "No KB results found"})
+
+
+# ---------------------------------------------------------------------------
 # LangGraph ReAct agent
 # ---------------------------------------------------------------------------
 llm = ChatOpenAI(
@@ -355,6 +390,7 @@ tools = [
     fetch_coingecko_data,
     fetch_whale_transactions,
     search_token_sentiment,
+    search_manipulation_patterns,
 ]
 
 agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
@@ -365,9 +401,18 @@ agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 # ---------------------------------------------------------------------------
 @entrypoint
 async def run(payload):
-    """Market Intelligence agent entrypoint."""
+    """Market Intelligence agent entrypoint with guardrails."""
+    from guardrails import check_input, process_output, redact_pii
+
     query = payload.get("input", "") or payload.get("query", "") or str(payload)
+
+    query = redact_pii(query)
+    blocked = check_input(query)
+    if blocked:
+        return blocked
+
     result = await agent.ainvoke({"messages": [("user", query)]})
     messages = result.get("messages", [])
     final = messages[-1].content if messages else "No analysis generated."
+    final = process_output(final)
     return {"output": final}

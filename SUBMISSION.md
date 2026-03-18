@@ -81,13 +81,4 @@ CryptoGuard is built entirely on DigitalOcean's Gradient AI platform.
 
 ## Built With
 
-- DigitalOcean Gradient AI (ADK, Knowledge Bases, Guardrails, Multi-Agent Routing, Serverless Inference, Tool Calling, Evaluations, Tracing)
-- Python 3.11
-- FastAPI
-- Next.js 14
-- React 18
-- TypeScript
-- Tailwind CSS
-- DexScreener API
-- Birdeye API
-- Solscan API
+DigitalOcean Gradient AI, Python, FastAPI, Next.js, React, TypeScript, Tailwind CSS, LangGraph, LangChain, DexScreener API, Birdeye API, Solscan API

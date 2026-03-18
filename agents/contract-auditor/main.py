@@ -304,6 +304,41 @@ async def analyze_bytecode_patterns(contract_address: str, chain: str = "ethereu
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Base retrieval tool
+# ---------------------------------------------------------------------------
+KB_CONTRACT_VULNS = "87e4aa23-2271-11f1-b074-4e013e2ddde4"
+KB_SAFETY = "a7a06322-2271-11f1-b074-4e013e2ddde4"
+KBAAS_URL = "https://kbaas.do-ai.run/v1"
+
+
+async def _kb_post(url: str, headers: dict, json_body: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(url, headers=headers, json=json_body)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.warning("KB request error: %s", exc)
+        return {"error": str(exc)}
+
+
+@tool
+async def search_vulnerability_patterns(query: str) -> str:
+    """Search CryptoGuard's knowledge base of smart contract vulnerabilities, exploit case studies, and honeypot patterns. Use this to check if a contract's behavior matches known exploit patterns."""
+    do_token = os.getenv("DIGITALOCEAN_API_TOKEN", "") or os.getenv("DIGITALOCEAN_ACCESS_TOKEN", "")
+    if not do_token:
+        return json.dumps({"note": "Knowledge base unavailable — DIGITALOCEAN_API_TOKEN not set. Proceeding with live API data only."})
+    results = []
+    for kb_uuid in [KB_CONTRACT_VULNS, KB_SAFETY]:
+        url = f"{KBAAS_URL}/{kb_uuid}/retrieve"
+        headers = {"Authorization": f"Bearer {do_token}"}
+        data = await _kb_post(url, headers=headers, json_body={"query": query, "num_results": 3})
+        for r in data.get("results", []):
+            results.append(r.get("text_content", ""))
+    return json.dumps({"knowledge_base_results": results[:5]}) if results else json.dumps({"note": "No KB results found"})
+
+
+# ---------------------------------------------------------------------------
 # LangGraph ReAct agent
 # ---------------------------------------------------------------------------
 llm = ChatOpenAI(
@@ -320,6 +355,7 @@ tools = [
     check_honeypot,
     fetch_gopluslabs_security,
     analyze_bytecode_patterns,
+    search_vulnerability_patterns,
 ]
 
 agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
@@ -330,9 +366,18 @@ agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 # ---------------------------------------------------------------------------
 @entrypoint
 async def run(payload):
-    """Smart Contract Auditor agent entrypoint."""
+    """Smart Contract Auditor agent entrypoint with guardrails."""
+    from guardrails import check_input, process_output, redact_pii
+
     query = payload.get("input", "") or payload.get("query", "") or str(payload)
+
+    query = redact_pii(query)
+    blocked = check_input(query)
+    if blocked:
+        return blocked
+
     result = await agent.ainvoke({"messages": [("user", query)]})
     messages = result.get("messages", [])
     final = messages[-1].content if messages else "No audit generated."
+    final = process_output(final)
     return {"output": final}

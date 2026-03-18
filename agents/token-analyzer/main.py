@@ -200,6 +200,42 @@ async def fetch_solscan_token_meta(token_address: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Base retrieval tool
+# ---------------------------------------------------------------------------
+KB_TOKEN_RISKS = "67c9668a-2271-11f1-b074-4e013e2ddde4"
+KB_SAFETY = "a7a06322-2271-11f1-b074-4e013e2ddde4"
+KBAAS_URL = "https://kbaas.do-ai.run/v1"
+
+
+@tool
+async def search_scam_patterns(query: str) -> str:
+    """Search CryptoGuard's knowledge base of known rug pull patterns, scam indicators, and real exploit case studies. Use this to compare a token's characteristics against known scam patterns."""
+    do_token = os.getenv("DIGITALOCEAN_API_TOKEN", "") or os.getenv("DIGITALOCEAN_ACCESS_TOKEN", "")
+    if not do_token:
+        return json.dumps({"note": "Knowledge base unavailable — DIGITALOCEAN_API_TOKEN not set. Proceeding with live API data only."})
+    results = []
+    for kb_uuid in [KB_TOKEN_RISKS, KB_SAFETY]:
+        url = f"{KBAAS_URL}/{kb_uuid}/retrieve"
+        headers = {"Authorization": f"Bearer {do_token}"}
+        data = await _http_get_post(url, headers=headers, json_body={"query": query, "num_results": 3})
+        for r in data.get("results", []):
+            results.append(r.get("text_content", ""))
+    return json.dumps({"knowledge_base_results": results[:5]}) if results else json.dumps({"note": "No KB results found"})
+
+
+async def _http_get_post(url: str, headers: dict | None = None, json_body: dict | None = None, timeout: float = 15.0) -> dict:
+    """HTTP POST with error handling."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, headers=headers or {}, json=json_body or {})
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.warning("KB request error: %s", exc)
+        return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # LangGraph ReAct agent
 # ---------------------------------------------------------------------------
 llm = ChatOpenAI(
@@ -216,6 +252,7 @@ tools = [
     fetch_birdeye_token_overview,
     fetch_solscan_token_holders,
     fetch_solscan_token_meta,
+    search_scam_patterns,
 ]
 
 agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
@@ -226,9 +263,22 @@ agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 # ---------------------------------------------------------------------------
 @entrypoint
 async def run(payload):
-    """Token Risk Analyzer agent entrypoint."""
+    """Token Risk Analyzer agent entrypoint with guardrails."""
+    from guardrails import check_input, process_output, redact_pii
+
     query = payload.get("input", "") or payload.get("query", "") or str(payload)
+
+    # Input guardrails
+    query = redact_pii(query)
+    blocked = check_input(query)
+    if blocked:
+        return blocked
+
+    # Run agent
     result = await agent.ainvoke({"messages": [("user", query)]})
     messages = result.get("messages", [])
     final = messages[-1].content if messages else "No analysis generated."
+
+    # Output guardrails
+    final = process_output(final)
     return {"output": final}
