@@ -65,14 +65,22 @@ export default function LoadingAnalysis() {
         </p>
       </div>
 
-      {/* Progress bar */}
+      {/* Ping-pong bar */}
       <div className="w-full max-w-sm">
-        <div className="h-1 bg-surface rounded-full overflow-hidden">
+        <div className="h-1 bg-surface rounded-full overflow-hidden relative">
           <div
-            className="h-full bg-gradient-to-r from-accent-teal to-accent-blue rounded-full transition-all duration-1000 ease-out"
-            style={{ width: `${Math.min(((activeAgent + 1) / agents.length) * 90 + (elapsed % 8) * 1.2, 98)}%` }}
+            className="absolute h-full w-1/3 bg-gradient-to-r from-transparent via-accent-teal to-transparent rounded-full"
+            style={{
+              animation: "pingpong 1.5s ease-in-out infinite alternate",
+            }}
           />
         </div>
+        <style jsx>{`
+          @keyframes pingpong {
+            0% { left: 0%; }
+            100% { left: 67%; }
+          }
+        `}</style>
       </div>
 
       {/* Agent steps */}
