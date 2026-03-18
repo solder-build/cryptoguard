@@ -1,6 +1,7 @@
 import { AnalysisResult, AgentAnalysis, RiskLevel } from "./types";
 import { getMockAnalysis, getMockChatResponse } from "./mock-data";
 
+// Use NEXT_PUBLIC_API_URL if set, otherwise use relative paths (Next.js rewrites proxy to backend)
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 // 3 minute timeout — agents can take 30-120s on free tier
@@ -10,9 +11,6 @@ async function apiFetch<T>(
   path: string,
   options: RequestInit
 ): Promise<{ data: T | null; error: string | null; isMock: boolean }> {
-  if (!API_URL) {
-    return { data: null, error: "No API URL configured", isMock: true };
-  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);

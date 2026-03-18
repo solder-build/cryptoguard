@@ -12,12 +12,11 @@ export default function LoadingAnalysis() {
   const [activeAgent, setActiveAgent] = useState(0);
   const [elapsed, setElapsed] = useState(0);
 
-  // Advance to next agent every 8s (realistic for actual agent response times)
-  // Caps at the last agent — no looping
+  // Cycle through agents every 3s
   useEffect(() => {
     const interval = setInterval(() => {
-      setActiveAgent((prev) => Math.min(prev + 1, agents.length - 1));
-    }, 8000);
+      setActiveAgent((prev) => (prev + 1) % agents.length);
+    }, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -86,9 +85,7 @@ export default function LoadingAnalysis() {
       {/* Agent steps */}
       <div className="w-full max-w-sm space-y-2">
         {agents.map((agent, i) => {
-          const isDone = i < activeAgent;
           const isActive = i === activeAgent;
-          const isPending = i > activeAgent;
 
           return (
             <div
@@ -96,27 +93,18 @@ export default function LoadingAnalysis() {
               className={`flex items-center gap-3 px-4 py-3 rounded-lg border transition-all duration-500 ${
                 isActive
                   ? "border-accent-teal/40 bg-accent-teal/5"
-                  : isDone
-                  ? "border-safe/20 bg-safe/5 opacity-80"
                   : "border-border/50 bg-surface/50 opacity-40"
               }`}
             >
-              <span className={`text-lg ${isPending ? "grayscale opacity-50" : ""}`}>
-                {agent.icon}
-              </span>
+              <span className="text-lg">{agent.icon}</span>
               <div className="flex-1 min-w-0">
-                <p className={`text-sm font-medium ${isDone ? "text-safe" : isActive ? "text-text-primary" : "text-text-secondary"}`}>
+                <p className={`text-sm font-medium ${isActive ? "text-text-primary" : "text-text-secondary"}`}>
                   {agent.name}
                 </p>
                 <p className="text-text-secondary text-xs truncate">
-                  {isDone ? "Done" : isActive ? agent.action : "Queued"}
+                  {isActive ? agent.action : "Standby"}
                 </p>
               </div>
-              {isDone && (
-                <svg className="w-4 h-4 text-safe flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-              )}
               {isActive && (
                 <div className="flex gap-1 flex-shrink-0">
                   <div className="w-1.5 h-1.5 bg-accent-teal rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
