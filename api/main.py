@@ -357,12 +357,7 @@ async def analyze(req: AnalyzeRequest):
     start_time = time.monotonic()
 
     # Determine which agents to call
-    # NOTE: Free-tier rate limits (~2-3 req/min) mean only 1 agent can run reliably.
-    # Default to token-analyzer only. Pass agents=["token-analyzer","contract-auditor","market-intel"] to try all.
-    if req.agents:
-        agent_ids = [a.value for a in req.agents]
-    else:
-        agent_ids = ["token-analyzer"]  # Default to most reliable agent on free tier
+    agent_ids = [a.value for a in req.agents] if req.agents else list(AGENT_CONFIG.keys())
 
     # Build the analysis prompt
     user_message = (
