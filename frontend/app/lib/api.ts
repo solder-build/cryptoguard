@@ -63,12 +63,45 @@ function mapApiResponse(raw: Record<string, unknown>): AnalysisResult {
     const agentScore = (ar.risk_score as number) ?? overallScore;
     const error = ar.error as string | undefined;
 
-    // Extract findings from the response text
-    const findings: string[] = [];
+    // Extract findings and summary from response
+    let findings: string[] = [];
+    let summary = "";
+    let details = response || error || "";
+
     if (response) {
-      const lines = response.split("\n").filter((l: string) => l.trim().startsWith("-") || l.trim().startsWith("*"));
-      findings.push(...lines.slice(0, 5).map((l: string) => l.replace(/^[\s\-\*]+/, "").trim()));
+      // Try parsing JSON from response (agent may return JSON block)
+      const jsonMatch = response.match(/\{[\s\S]*"findings"[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (Array.isArray(parsed.findings)) {
+            findings = parsed.findings.map((f: string) => f.replace(/^[\s\-\*]+/, "").trim());
+          }
+          summary = parsed.recommendation || parsed.summary || "";
+          // Clean details: remove raw JSON, keep readable text
+          details = response.replace(jsonMatch[0], "").replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+          if (!details) details = parsed.recommendation || "";
+        } catch {
+          // JSON parse failed, fall through to line parsing
+        }
+      }
+
+      // Fallback: extract bullet points
+      if (findings.length === 0) {
+        const lines = response.split("\n").filter((l: string) => l.trim().startsWith("-") || l.trim().startsWith("*"));
+        findings = lines.slice(0, 5).map((l: string) => l.replace(/^[\s\-\*]+/, "").trim()).filter(Boolean);
+      }
+
+      // Fallback summary
+      if (!summary) {
+        const recMatch = response.match(/recommendation[:\s]+(.*?)(?:\n|$)/i);
+        summary = recMatch ? recMatch[1].trim() : response.replace(/```[\s\S]*?```/g, "").slice(0, 200);
+      }
+
+      // Clean up details — remove disclaimer duplication
+      details = details.replace(/---[\s\S]*Disclaimer[\s\S]*$/i, "").trim();
     }
+
     if (error) {
       findings.push(`Agent error: ${error.slice(0, 100)}`);
     }
@@ -78,9 +111,9 @@ function mapApiResponse(raw: Record<string, unknown>): AnalysisResult {
       name: (ar.agent_name as string) || agentId,
       score: agentScore,
       riskLevel: scoreToRiskLevel(agentScore),
-      summary: response.slice(0, 200) || error || "No response",
-      findings: findings.length > 0 ? findings : ["Analysis in progress..."],
-      details: response || error || "",
+      summary: summary || error || "Analysis completed",
+      findings: findings.length > 0 ? findings : ["No specific findings reported"],
+      details,
     };
   });
 
