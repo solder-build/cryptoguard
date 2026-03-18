@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: cryptoguard-api
+    runtime: python
+    rootDir: api
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DIGITALOCEAN_API_TOKEN
+        sync: false
+      - key: GRADIENT_MODEL_ACCESS_KEY
+        sync: false
+      - key: TOKEN_ANALYZER_ENDPOINT
+        value: https://agents.do-ai.run/v1/906dafbe-3420-42c7-bf75-c5c771ca1c2c/main/run
+      - key: CONTRACT_AUDITOR_ENDPOINT
+        value: https://agents.do-ai.run/v1/970aa0f7-f8fc-47bf-9ee6-e0f54ebe5bc1/main/run
+      - key: MARKET_INTEL_ENDPOINT
+        value: https://agents.do-ai.run/v1/082ccfb5-9f42-401d-ba3b-801b29f597e4/main/run
+      - key: TOKEN_ANALYZER_KEY
+        sync: false
+      - key: CONTRACT_AUDITOR_KEY
+        sync: false
+      - key: MARKET_INTEL_KEY
+        sync: false
+
+  - type: web
+    name: cryptoguard-frontend
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: BACKEND_URL
+        fromService:
+          name: cryptoguard-api
+          type: web
+          property: hostport
