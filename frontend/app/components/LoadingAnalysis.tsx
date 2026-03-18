@@ -3,29 +3,40 @@
 import { useEffect, useState } from "react";
 
 const agents = [
-  { icon: "\uD83D\uDD0D", name: "Token Risk Analyzer", action: "Scanning token fundamentals..." },
-  { icon: "\uD83D\uDEE1\uFE0F", name: "Smart Contract Auditor", action: "Auditing contract security..." },
-  { icon: "\uD83D\uDCCA", name: "Market Intelligence", action: "Gathering market signals..." },
+  { icon: "\uD83D\uDD0D", name: "Token Risk Analyzer", action: "Scanning liquidity, holders, permissions..." },
+  { icon: "\uD83D\uDEE1\uFE0F", name: "Smart Contract Auditor", action: "Checking for honeypots, hidden functions..." },
+  { icon: "\uD83D\uDCCA", name: "Market Intelligence", action: "Analyzing volume, whales, sentiment..." },
 ];
 
 export default function LoadingAnalysis() {
   const [activeAgent, setActiveAgent] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
 
+  // Advance to next agent every 8s (realistic for actual agent response times)
+  // Caps at the last agent — no looping
   useEffect(() => {
     const interval = setInterval(() => {
-      setActiveAgent((prev) => (prev + 1) % agents.length);
-    }, 800);
+      setActiveAgent((prev) => Math.min(prev + 1, agents.length - 1));
+    }, 8000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Elapsed timer
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setElapsed((prev) => prev + 1);
+    }, 1000);
     return () => clearInterval(interval);
   }, []);
 
   return (
     <div className="flex flex-col items-center gap-8 py-16">
-      {/* Pulsing shield */}
+      {/* Scanning animation */}
       <div className="relative">
-        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-accent-teal/20 to-accent-blue/20 flex items-center justify-center animate-pulse">
+        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-accent-teal/20 to-accent-blue/20 flex items-center justify-center">
           <div className="w-14 h-14 rounded-full bg-gradient-to-br from-accent-teal/30 to-accent-blue/30 flex items-center justify-center">
             <svg
-              className="w-8 h-8 text-accent-teal"
+              className="w-8 h-8 text-accent-teal animate-pulse"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -39,63 +50,75 @@ export default function LoadingAnalysis() {
             </svg>
           </div>
         </div>
+        {/* Orbiting dot */}
+        <div className="absolute inset-0 animate-spin" style={{ animationDuration: "3s" }}>
+          <div className="w-2.5 h-2.5 bg-accent-teal rounded-full absolute -top-1 left-1/2 -translate-x-1/2 shadow-lg shadow-accent-teal/50" />
+        </div>
       </div>
 
       <div className="text-center">
-        <h3 className="text-text-primary text-xl font-semibold mb-2">
-          Agents Analyzing...
+        <h3 className="text-text-primary text-xl font-semibold mb-1">
+          Analyzing Target
         </h3>
         <p className="text-text-secondary text-sm">
-          Our AI security team is reviewing this target
+          {elapsed}s elapsed
         </p>
       </div>
 
-      {/* Agent progress */}
-      <div className="w-full max-w-sm space-y-3">
-        {agents.map((agent, i) => (
+      {/* Progress bar */}
+      <div className="w-full max-w-sm">
+        <div className="h-1 bg-surface rounded-full overflow-hidden">
           <div
-            key={i}
-            className={`flex items-center gap-3 px-4 py-3 rounded-lg border transition-all duration-300 ${
-              i === activeAgent
-                ? "border-accent-teal/40 bg-accent-teal/5"
-                : i < activeAgent
-                ? "border-safe/30 bg-safe/5"
-                : "border-border bg-surface"
-            }`}
-          >
-            <span className="text-xl">{agent.icon}</span>
-            <div className="flex-1">
-              <p className="text-text-primary text-sm font-medium">
-                {agent.name}
-              </p>
-              <p className="text-text-secondary text-xs">
-                {i < activeAgent
-                  ? "Complete"
-                  : i === activeAgent
-                  ? agent.action
-                  : "Waiting..."}
-              </p>
+            className="h-full bg-gradient-to-r from-accent-teal to-accent-blue rounded-full transition-all duration-1000 ease-out"
+            style={{ width: `${Math.min(((activeAgent + 1) / agents.length) * 90 + (elapsed % 8) * 1.2, 98)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Agent steps */}
+      <div className="w-full max-w-sm space-y-2">
+        {agents.map((agent, i) => {
+          const isDone = i < activeAgent;
+          const isActive = i === activeAgent;
+          const isPending = i > activeAgent;
+
+          return (
+            <div
+              key={i}
+              className={`flex items-center gap-3 px-4 py-3 rounded-lg border transition-all duration-500 ${
+                isActive
+                  ? "border-accent-teal/40 bg-accent-teal/5"
+                  : isDone
+                  ? "border-safe/20 bg-safe/5 opacity-80"
+                  : "border-border/50 bg-surface/50 opacity-40"
+              }`}
+            >
+              <span className={`text-lg ${isPending ? "grayscale opacity-50" : ""}`}>
+                {agent.icon}
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm font-medium ${isDone ? "text-safe" : isActive ? "text-text-primary" : "text-text-secondary"}`}>
+                  {agent.name}
+                </p>
+                <p className="text-text-secondary text-xs truncate">
+                  {isDone ? "Done" : isActive ? agent.action : "Queued"}
+                </p>
+              </div>
+              {isDone && (
+                <svg className="w-4 h-4 text-safe flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+              {isActive && (
+                <div className="flex gap-1 flex-shrink-0">
+                  <div className="w-1.5 h-1.5 bg-accent-teal rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <div className="w-1.5 h-1.5 bg-accent-teal rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <div className="w-1.5 h-1.5 bg-accent-teal rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                </div>
+              )}
             </div>
-            {i < activeAgent && (
-              <svg
-                className="w-4 h-4 text-safe"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={3}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-            )}
-            {i === activeAgent && (
-              <div className="w-4 h-4 border-2 border-accent-teal border-t-transparent rounded-full animate-spin" />
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
