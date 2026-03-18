@@ -18,6 +18,7 @@ export interface AnalysisResult {
   overallRisk: RiskLevel;
   timestamp: string;
   agents: AgentAnalysis[];
+  isMock?: boolean;
 }
 
 export interface ChatMessage {

@@ -104,24 +104,21 @@ function AnalyzeContent() {
             </div>
           </div>
 
-          {/* Demo mode banner */}
-          <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-accent-teal/5 border border-accent-teal/20 text-xs text-accent-teal">
-            <svg
-              className="w-4 h-4 flex-shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
+          {/* Demo mode banner — only when using mock data */}
+          {result.isMock && (
+            <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-accent-teal/5 border border-accent-teal/20 text-xs text-accent-teal">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>Demo mode — showing mock analysis data. Connect the backend API for live results.</span>
+            </div>
+          )}
+
+          {/* NFA Disclaimer — always shown */}
+          <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-yellow-500/5 border border-yellow-500/20 text-xs text-yellow-500">
+            <span className="flex-shrink-0 text-base">&#9888;&#65039;</span>
             <span>
-              Demo mode — showing mock analysis data. Connect the backend API
-              for live results.
+              <strong>Not Financial Advice.</strong> CryptoGuard provides risk analysis for informational purposes only. Always do your own research (DYOR) before making any investment decisions.
             </span>
           </div>
 

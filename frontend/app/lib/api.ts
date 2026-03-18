@@ -103,6 +103,7 @@ function mapApiResponse(raw: Record<string, unknown>): AnalysisResult {
     overallRisk: scoreToRiskLevel(overallScore),
     timestamp: (raw.timestamp as string) || new Date().toISOString(),
     agents,
+    isMock: false,
   };
 }
 
@@ -117,7 +118,9 @@ export async function analyzeToken(
 
   if (isMock || !data) {
     await new Promise((r) => setTimeout(r, 2500));
-    return getMockAnalysis(query);
+    const mock = getMockAnalysis(query);
+    mock.isMock = true;
+    return mock;
   }
 
   return mapApiResponse(data);
